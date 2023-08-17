@@ -43,7 +43,7 @@ if [ ! -d /usr/lib/firefox-esr/ ]; then
 fi
 
 # The system core information (32bits or 64bits)
-system=$(uname -a | awk '{print $9}')
+system=$(uname -m)
 #No error at the start
 error_link=1
 
@@ -59,6 +59,7 @@ while [[ ! -z $error_link ]]; do
 done
 
 version=$(echo $link_firefox | cut -f7 -d'/')
+sudo su - root -c "echo $version > /opt/firefox/releases/actual_version"
 
 # If is an install the flag will be empty if not will be 1 logic
 install_or_update=$([ -f /opt/firefox/firefox ] && ls /opt/firefox/firefox || echo '')
