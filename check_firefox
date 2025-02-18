@@ -1,32 +1,56 @@
 #!/bin/bash
-# Distributed by GNU public license
+
+# Nastavte DEBUG na 1 pro zapnutí debugování, 0 pro vypnutí
+DEBUG=0
+
+if [ $DEBUG -eq 1 ]; then
+    set -x
+fi
+
+debug_echo() {
+    if [ $DEBUG -eq 1 ]; then
+        echo "DEBUG: $1"
+    fi
+}
+
 user=$USER
 have_you_sudo=$(sudo -k || echo 'Error')
 have_you_curl=$(curl --silent --output /dev/null example.com || echo 'Error')
-clear
 
-echo 'Install/Update Firefox script'
+language=cs
+log_file="/var/log/firefox_update.log"
+max_attempts=3
+
+debug_echo "language=$language"
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$log_file"
+    echo "$1"
+}
+
+log "Starting Install/Update Firefox script"
+
 if [ ! -z "$have_you_sudo" ]; then
-    echo 'Please give the credentials of superuser for install sudo in your system'
+    log "Installing sudo"
     su - root -c "apt install sudo -y && echo -e '$user    ALL=(ALL:ALL) ALL' >> /etc/sudoers"
     have_you_sudo=$(sudo || echo '')
-    if [ -z "$have_you_sudo" ]; then 
-        echo 'Done! now you have sudo in your system!'
+    if [ -z "$have_you_sudo" ]; then
+        log "Done! Now you have sudo in your system!"
     else
-        echo 'A problem has ocurred! Please restart the script'
-        return
+        log "A problem has occurred! Exiting script."
+        exit 1
     fi
 fi
 
 if [ ! -z "$have_you_curl" ]; then
-    echo 'installing curl in your system'
+    log "Installing curl in your system"
     su - root -c "apt install curl -y"
     have_you_curl=$(curl --silent --output /dev/null example.com || echo 'Error')
-    if [ -z "$have_you_curl" ]; then 
-        echo 'Done! now you have curl in your system!'
+    if [ -z "$have_you_curl" ]; then
+        log "Done! Now you have curl in your system!"
     else
-        echo 'A problem has ocurred! Please restart the script'
-        return
+        log "A problem has occurred! Exiting script."
+        exit 1
     fi
 fi
 
@@ -34,65 +58,116 @@ if [ ! -d /opt/firefox/releases ]; then
     sudo mkdir -p /opt/firefox/releases
 fi
 
-# The system core information (32bits or 64bits)
-system=$(uname -a | awk '{print $9}')
-#No error at the start
+if [ ! -d /usr/lib/firefox-esr/ ]; then
+    sudo mkdir -p /usr/lib/firefox-esr/
+fi
+
+system=$(uname -m)
+debug_echo "system=$system"
+
+# Funkce pro získání nejnovější verze Firefoxu
+get_latest_version() {
+    curl -s "https://product-details.mozilla.org/1.0/firefox_versions.json" | grep -oP '"LATEST_FIREFOX_VERSION": "\K[^"]+'
+}
+
+# Získání nejnovější verze
+latest_version=$(get_latest_version)
+log "Latest Firefox version: $latest_version"
+
+# Kontrola aktuálně nainstalované verze
+if [ -f "/opt/firefox/releases/actual_version" ]; then
+    installed_version=$(cat /opt/firefox/releases/actual_version)
+    log "Installed Firefox version: $installed_version"
+    if [ "$installed_version" = "$latest_version" ]; then
+        log "Firefox is already up to date. Exiting."
+        exit 0
+    else
+        log "A new version of Firefox is available: $latest_version. Proceeding with update."
+        # Přesun aktuální verze do old_version před aktualizací
+        sudo mv /opt/firefox/releases/actual_version /opt/firefox/releases/old_version
+    fi
+else
+    log "No installed version found. This is the first run. Proceeding with installation."
+fi
+
+# Aktualizace informací o verzích po stažení a instalaci
+echo "$latest_version" | sudo tee /opt/firefox/releases/actual_version > /dev/null
+log "Firefox version information updated to $latest_version"
+
+# Generování URL pro stažení
+if [ "$system" = "x86_64" ] || [ "$system" = "amd64" ]; then
+    os_param="linux64"
+else
+    os_param="linux"
+fi
+
+download_url="https://download.mozilla.org/?product=firefox-${latest_version}&os=${os_param}&lang=${language}"
+log "Download URL: $download_url"
+
+# Stažení Firefoxu
 error_link=1
-
-while [[ ! -z $error_link ]]; do
-    if [ $system == 'x86_64' ] || [ $system == 'amd_64' ]; then
-        link_firefox=$(curl -s "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" | awk '{ print $2 }' | cut -f2 -d'"')
-        error_link=$(sudo wget -P /opt/firefox/releases -N $link_firefox || echo '\n\nLink not found! verify your internet conecction!... trying again\n\n');
-    else
-        link_firefox=$(curl -s "https://download.mozilla.org/?product=firefox-latest&os=linux&lang=en-US" | awk '{ print $2 }' | cut -f2 -d'"')
-        error_link=$(sudo wget -P /opt/firefox/releases -N $link_firefox || echo '\n\nLink not found! verify your internet conecction!... trying again\n\n');
+attempts=0
+while [[ $attempts -lt $max_attempts ]]; do
+    if [ -f "/opt/firefox/releases/firefox-${latest_version}.tar.xz" ]; then
+        log "Local file already exists, skipping download."
+        error_link=""
+        break
     fi
-    echo -e $error_link
-done
 
-version=$(echo $link_firefox | cut -f7 -d'/')
+    wget_output=$(sudo wget -q -O "/opt/firefox/releases/firefox-${latest_version}.tar.xz" "$download_url" 2>&1)
 
-# If is an install the flag will be empty if not will be 1 logic
-install_or_update=$(ls /opt/firefox/firefox || echo '')
-
-# If the var is empty do the simbolic link and preserve the original link
-if [[ -z $install_or_update ]]; then
-    sudo mv /usr/lib/firefox-esr/firefox-esr /usr/lib/firefox-esr/firefox-esr_orig
-    sudo ln -s /opt/firefox/firefox/firefox /usr/lib/firefox-esr/firefox-esr
-fi
-
-echo 'La version de firefox es $version'
-error_unzip=$(sudo tar -f /opt/firefox/releases/firefox-$version.tar.bz2 --test-label || echo '\n\nERROR: The download has failed!...resuming download\n\n')
-
-while [[ ! -z $error_unzip ]]; do
-    echo -e $error_unzip
-    wget -P /opt/firefox/releases/ -c $link_firefox
-    error_unzip=$(sudo tar -f /opt/firefox/releases/firefox-$version.tar.bz2 --test-label || echo '\n\nERROR: The download has failed!...resuming download\n\n')
-done
-
-sudo tar xjf /opt/firefox/releases/firefox-$version.tar.bz2 -C /opt/firefox  
-
-if [[ -z $install_or_update ]]; then
-    echo 'Firefox has been installed correctly!';
-else
-    echo 'Firefox has been updated correctly!';
-fi
-
-# Manage the versions
-if [ ! -f '/opt/firefox/releases/actual_version' ]; then
-    sudo su - root -c "echo $version > /opt/firefox/releases/actual_version"
-else
-    if [ -f '/opt/firefox/releases/old_version' ]; then
-        actual_version=$(cat /opt/firefox/releases/actual_version)
-        old_version=$(cat /opt/firefox/releases/old_version)
-        if [ "$old_version" != "$actual_version" ]; then        
-            sudo su - root -c "cat /opt/firefox/releases/actual_version > /opt/firefox/releases/old_version" 
-            sudo su - root -c "echo $version > /opt/firefox/releases/actual_version"
-            sudo rm -rf /opt/firefox/releases/firefox-$old_version.tar.bz2;
+    if [ $? -eq 0 ]; then
+        log "Firefox successfully downloaded"
+        error_link=""
+        break
+    else
+        log "Download failed. Attempt $((attempts+1)) of $max_attempts. Error: $wget_output"
+        error_link="Error"
+        attempts=$((attempts+1))
+        if [ $attempts -lt $max_attempts ]; then
+            log "Retrying in 10 seconds..."
+            sleep 10
         fi
-    else
-        sudo su - root -c "cat /opt/firefox/releases/actual_version > /opt/firefox/releases/old_version" 
-        sudo su - root -c "echo $version > /opt/firefox/releases/actual_version"
-        sudo rm -rf /opt/firefox/releases/firefox-$old_version.tar.bz2;
+    fi
+done
+
+if [ $attempts -eq $max_attempts ]; then
+    log "Download failed after $max_attempts attempts. Exiting script."
+    exit 1
+fi
+
+# Kontrola integrity staženého souboru pomocí tar --test-label
+if ! tar --test-label -f "/opt/firefox/releases/firefox-${latest_version}.tar.xz" > /dev/null 2>&1; then
+    log "Archive integrity check failed. Exiting script."
+    exit 1
+fi
+
+# Rozbalení archivu
+if ! sudo tar xJf "/opt/firefox/releases/firefox-${latest_version}.tar.xz" -C /opt; then
+    log "Failed to extract archive. Exiting script."
+    exit 1
+fi
+
+# Aktualizace symbolického odkazu
+sudo ln -sf /opt/firefox/firefox /usr/lib/firefox-esr/firefox-esr
+
+# Aktualizace informací o verzi
+echo "$latest_version" | sudo tee /opt/firefox/releases/actual_version > /dev/null
+log "Firefox has been updated to version $latest_version"
+
+# Odstranění starého archivu
+if [ -f "/opt/firefox/releases/old_version" ]; then
+    old_version=$(cat /opt/firefox/releases/old_version)
+    old_archive="/opt/firefox/releases/firefox-${old_version}.tar.xz"
+    if [ -f "$old_archive" ]; then
+        log "Deleting old archive: $old_archive"
+        sudo rm "$old_archive"
+        if [ $? -eq 0 ]; then
+            log "Successfully deleted old archive: $old_archive"
+        else
+            log "Failed to delete old archive: $old_archive"
+        fi
     fi
 fi
+
+log "Script completed"
